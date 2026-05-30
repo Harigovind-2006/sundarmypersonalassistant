@@ -12,12 +12,14 @@ import json
 try:
     import pyttsx3
     import speech_recognition as sr
+    import webview
 except ImportError:
     print("Missing dependencies. Please run 'pip install -r requirements.txt'")
     sys.exit(1)
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from config_manager import load_config
 from diagnostics import run_diagnostics
 
@@ -37,6 +39,7 @@ assistant_state = {
     "status": "Initializing...",
     "last_command": ""
 }
+desktop_window = None
 
 async def broadcast_state(status_update=None, last_command=None):
     if status_update:
@@ -188,7 +191,9 @@ def voice_assistant_loop():
         broadcast_sync(status_update="Could not connect to microphone.")
         return
 
-    speak("Sundar is online and ready in the background.")
+    # Wait for the server to be ready before speaking
+    time.sleep(2)
+    speak("Sundar is online and ready.")
     
     while True:
         command = listen(recognizer, microphone)
@@ -208,11 +213,14 @@ def voice_assistant_loop():
         # Intent Dispatcher
         if any(word in command for word in ["exit", "quit", "goodbye", "bye"]):
             speak("Goodbye.")
+            if desktop_window:
+                desktop_window.destroy()
             os._exit(0)
             
         elif any(phrase in command for phrase in ["open interface", "show interface", "open frontend"]):
-            speak("Opening the visual interface.")
-            webbrowser.open("http://localhost:5173")
+            speak("The interface is already running.")
+            if desktop_window:
+                desktop_window.restore()
             
         elif "play" in command:
             handle_play_music(command)
@@ -233,12 +241,6 @@ def voice_assistant_loop():
             speak("I'm not sure how to handle that yet.")
 
 
-@app.on_event("startup")
-async def startup_event():
-    # Start the voice loop in a background thread
-    t = threading.Thread(target=voice_assistant_loop, daemon=True)
-    t.start()
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -248,12 +250,39 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_text(json.dumps(assistant_state))
         while True:
             data = await websocket.receive_text()
-            # If we want frontend buttons to trigger actions, we can parse data here.
             pass
     except WebSocketDisconnect:
         connected_clients.remove(websocket)
 
-if __name__ == "__main__":
+# Serve the static files from frontend/dist
+dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if os.path.exists(dist_dir):
+    app.mount("/", StaticFiles(directory=dist_dir, html=True), name="static")
+
+def run_fastapi_server():
     import uvicorn
-    # Make sure to run from the root or provide correct module path
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="error")
+
+if __name__ == "__main__":
+    # 1. Start FastAPI server in a background thread
+    server_thread = threading.Thread(target=run_fastapi_server, daemon=True)
+    server_thread.start()
+
+    # 2. Start Voice Assistant in a background thread
+    voice_thread = threading.Thread(target=voice_assistant_loop, daemon=True)
+    voice_thread.start()
+
+    # 3. Start PyWebview GUI on the main thread
+    # Wait a tiny bit to ensure FastAPI is listening before loading the URL
+    time.sleep(1)
+    desktop_window = webview.create_window(
+        title="Sundar AI",
+        url="http://127.0.0.1:8000",
+        width=450,
+        height=550,
+        resizable=False,
+        frameless=False,
+        background_color='#0f172a'
+    )
+    # Start the desktop app loop (blocking)
+    webview.start()
